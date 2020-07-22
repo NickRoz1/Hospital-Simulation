@@ -1,0 +1,15 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/hospital-simulation
+hospital-simulation.so
+hospital-simulation.dylib
+hospital-simulation.dll
+hospital-simulation.a
+hospital-simulation.lib
+hospital-simulation-test-*
+*.exe
+*.o
+*.obj
+*.lst

@@ -1,0 +1,9 @@
+{
+	"authors": [
+		"NickRoz"
+	],
+	"copyright": "Copyright © 2020, NickRoz",
+	"description": "Hospital simulation",
+	"license": "proprietary",
+	"name": "hospital-simulation"
+}
