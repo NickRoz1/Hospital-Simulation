@@ -8,18 +8,25 @@ import std.container : DList;
 import std.container.rbtree;
 import std.uuid;
 import std.conv;
+import std.datetime;
+import std.range.interfaces;
+import std.json;
+import std.file;
 
 /// @brief Amount of ticks in one minute.
-const size_t TICKS_MINUTE = 60;
+const long TICKS_MINUTE = 60;
 
 /// @brief Amount of ticks in one hour.
-const size_t TICKS_HOUR = TICKS_MINUTE * 60;
+const long TICKS_HOUR = TICKS_MINUTE * 60;
 
 /// @brief Duration of work shift for hospital personnel.
-const size_t SHIFT_DURATION = 8 * TICKS_HOUR;
+const long SHIFT_DURATION = 8 * TICKS_HOUR;
 
 /// @brief Duration of minimal stay duration.
-const size_t MIN_STAY_DUR = TICKS_MINUTE;
+const long MIN_STAY_DUR = TICKS_MINUTE;
+
+/// @brief Current time
+auto currTime = DateTime(2020, 7, 27);
 
 /// @brief Type of agents in hospital
 enum AgentType
@@ -29,6 +36,14 @@ enum AgentType
 	VISITOR,
 	PATIENT
 };
+
+void fillArray(T)(T[] arr)
+{
+	foreach (i; 0 .. arr.length)
+	{
+		arr[i] = new T();
+	}
+}
 
 /// @brief Maximum stay at cell duration for different types of agents.
 enum maxStayDuration = [
@@ -53,12 +68,23 @@ abstract class Agent
 	/// @brief Process next tick.
 	void tick()
 	{
+		if (finished)
+			return;
 		Cell currCell = scheduleQueue.front[0];
-		const size_t stayDur = scheduleQueue.front[1];
+		const long stayDur = scheduleQueue.front[1];
+		timeInCurrCell++;
+		// writeln("LOL");
+		// writeln(timeInCurrCell)
 		if (timeInCurrCell < stayDur)
 			return;
+		// writeln("EXACTLY!" ~ this.toString());
 		currCell.leaveCell(this);
 		scheduleQueue.removeFront();
+		if (scheduleQueue.empty)
+		{
+			finished = true;
+			return;
+		}
 		currCell = scheduleQueue.front[0];
 		currCell.enterCell(this);
 	}
@@ -67,16 +93,18 @@ abstract class Agent
 	bool isSchedulable()
 	{
 		assert(notScheduledTime >= 0);
-		return notScheduledTime != 0;
+		return notScheduledTime >= 0;
 	}
 	/// @brief Time not scheduled yet.
-	size_t notScheduledTime;
+	long notScheduledTime = SHIFT_DURATION;
 
 	/// @brief Time spent in current cell;
-	size_t timeInCurrCell;
+	long timeInCurrCell;
 
 	/// @brief Convenience alias of (Cell, Duration) pair (tuple).
-	alias CellDurPair = Tuple!(Cell, size_t);
+	alias CellDurPair = Tuple!(Cell, long);
+
+	bool finished = false;
 
 	/// @brief Agent schedule queue. Consists of Cell reference and Duration variable.
 	/// every time timeInCurrCell becomes equal to Duration variable, schedule pops front,
@@ -84,85 +112,115 @@ abstract class Agent
 	///
 	/// @note Filled on scheduling stage started from Hospital constructor.
 	DList!(CellDurPair) scheduleQueue;
+
+	string toStringSchedule()
+	{
+		string str = "Schedule ";
+		foreach (pair; scheduleQueue)
+		{
+			str ~= "\n    Cell:" ~ to!string(pair[0].id);
+			str ~= "\n    Time:" ~ to!string(pair[1]);
+		}
+		return str;
+	}
 }
 
-interface SchedulableAgent
+/// @brief Mixin for common functionality for agents which have schedule
+mixin template SchedulableAgent(AgentType agentT)
+		if (AgentType.min <= agentT && agentT <= AgentType.max)
 {
 	/// @brief Schedule visit to cell. Returns scheduled duration of visit.
-	size_t schedule(Cell cell, size_t requestedTime);
+	final long schedule(Cell cell, long requestedTime, long delayToFirst)
+	{
+		bool isFirstCell = scheduleQueue.empty;
+		CellDurPair cellDurPair;
+		const long stayDur = scheduleImpl(maxStayDuration[agentT], notScheduledTime, requestedTime);
+		if (isFirstCell)
+		{
+			/// @note Create dummy cell to wait in till the delay to the first cell passes.
+			/// Nurse room may be introduced later.
+			cellDurPair = CellDurPair(new Cell(0, -1), delayToFirst);
+		}
+		else
+		{
+			cellDurPair = CellDurPair(cell, stayDur);
+		}
+		Cell previousCell;
+		if (!isFirstCell && (previousCell = scheduleQueue.back[0]) == cell)
+		{
+			auto dur = scheduleQueue.back[1];
+			dur += stayDur;
+		}
+		else
+		{
+			scheduleQueue.insertBack(cellDurPair);
+		}
+		return stayDur;
+	}
 
 	/// @brief Helper function to avoid code duplication. 
 	/// @note Generates stay duration and decreases amount of notScheduledTime
-	final size_t scheduleImpl(size_t maxStayDur, ref size_t notScheduledTime, size_t requestedTime)
+	final long scheduleImpl(long maxStayDur, ref long notScheduledTime, long requestedTime)
 	{
-		const size_t cappedStayDur = min(notScheduledTime, maxStayDur);
-		const size_t durOfVisit = uniform!"[]"(0, cappedStayDur);
+		const long minDurOfVisit = min(notScheduledTime, TICKS_MINUTE, requestedTime);
+		const long cappedStayDur = min(notScheduledTime, maxStayDur, requestedTime);
+		const long durOfVisit = uniform!"[]"(0, cappedStayDur);
 		notScheduledTime -= durOfVisit;
 		return durOfVisit;
 	}
 }
 
 /// @brief Doctor class. Visits subset of hospital sets every hour.
-class Nurse : Agent, SchedulableAgent
+class Nurse : Agent
 {
 public:
-	this()
-	{
-		notScheduledTime = SHIFT_DURATION;
-	}
+	mixin SchedulableAgent!(AgentType.NURSE);
 
-	override size_t schedule(Cell cell, size_t requestedTime)
+	/// @brief Get string representation
+	override string toString() const
 	{
-		const size_t stayDur = scheduleImpl(maxStayDuration[AgentType.NURSE],
-				notScheduledTime, requestedTime);
-		auto cellDurPair = CellDurPair(cell, stayDur);
-		scheduleQueue.insertBack(cellDurPair);
-		return stayDur;
+		return id.toString();
 	}
 }
 
 /// @brief Doctor class. Visits subset of hospital sets once a day.
-class Doctor : Agent, SchedulableAgent
+class Doctor : Agent
 {
-	this()
-	{
-		notScheduledTime = SHIFT_DURATION;
-	}
+public:
+	mixin SchedulableAgent!(AgentType.DOCTOR);
 
-	override size_t schedule(Cell cell, size_t requestedTime)
+	/// @brief Get string representation
+	override string toString()
 	{
-		const size_t stayDur = scheduleImpl(maxStayDuration[AgentType.DOCTOR],
-				notScheduledTime, requestedTime);
-		auto cellDurPair = CellDurPair(cell, stayDur);
-		scheduleQueue.insertBack(cellDurPair);
-		return stayDur;
+		return id.toString();
 	}
 }
 
-/// @brief Visitor class. Visit one cell 2-3 times a day.
-class Visitor : Agent, SchedulableAgent
+/// @brief Visitor class. Visits one cell 2-3 times a day.
+class Visitor : Agent
 {
+public:
+	mixin SchedulableAgent!(AgentType.VISITOR);
+
 	this()
 	{
 		notScheduledTime = TICKS_HOUR;
 	}
 
-	override size_t schedule(Cell cell, size_t requestedTime)
+	/// @brief Get string representation
+	override string toString() const
 	{
-		const size_t stayDur = scheduleImpl(maxStayDuration[AgentType.VISITOR],
-				notScheduledTime, requestedTime);
-		auto cellDurPair = CellDurPair(cell, stayDur);
-		scheduleQueue.insertBack(cellDurPair);
-		return stayDur;
+		return id.toString();
 	}
 }
 
 /// @brief Patients class. Exists only in boundaries of it's cell.
 class Patient : Agent
 {
-	override void tick()
+	/// @brief Get string representation
+	override string toString() const
 	{
-		/// @note Patients are staying inside cell.
+		return id.toString();
 	}
 }
 
@@ -174,14 +232,15 @@ class Cell
 public:
 
 	/// @brief Cell ID
-	const size_t id;
+	const long id;
 
 	/// @brief Create cell with `patientNum` patients inside
-	this(const size_t patientNum, const size_t cellId)
+	this(const long patientNum, const long cellId)
 	{
 		id = cellId;
 		Patient[] patients;
 		patients.length = patientNum;
+		fillArray(patients);
 		foreach (ref patient; patients)
 		{
 			agents[patient] = true;
@@ -201,29 +260,20 @@ public:
 	}
 
 	/// @brief Process next tick
-	void tick(bool performLog = false)
+	void tick()
 	{
-		foreach (ref agent; agents.byKey())
-		{
-			agent.tick();
-		}
-		if (performLog)
-			logState();
+		logState();
 	}
 
 	/// @brief Logs agents located in the currect cell.
 	void logState()
 	{
-		writeln("Cell " ~ to!string(id) ~ " contains:");
-		foreach (ref agent; agents.byKey())
-		{
-			writeln("   " ~ agent.id.toString());
-		}
+		logger(id, agents.byKey());
 	}
 
 	/// @brief Returns amount of time certain type of agents must
 	/// spend within cell throughout the day.
-	static size_t getAgentPresenceTime(AgentType agentT)
+	static long getAgentPresenceTime(AgentType agentT)
 	{
 		final switch (agentT)
 		{
@@ -248,11 +298,11 @@ class Hospital
 {
 public:
 	/// @brief Create hospital with `size` cells
-	this(size_t size)
+	this(long size)
 	{
-		size_t[] patientNums;
+		long[] patientNums;
 		patientNums.length = size;
-		const size_t minPatientNum = 2;
+		const long minPatientNum = 2;
 		foreach (i; 0 .. size)
 		{
 			/// @note number of patients in cell 2-4
@@ -264,13 +314,14 @@ public:
 
 	/// @brief Create hospital with patientNums.length cells occupied with
 	/// corresponding number of patients specified in patientNums
-	this(size_t[] patientNums)
+	this(long[] patientNums)
 	{
 		_cells.length = patientNums.length;
 		foreach (i; 0 .. patientNums.length)
 		{
 			_cells[i] = new Cell(patientNums[i], i);
 		}
+		createSchedule();
 	}
 
 	/// @brief Process next tick
@@ -281,19 +332,29 @@ public:
 	/// time since last log passed, cell logs every agent left in it. 
 	void tick()
 	{
-		foreach (ref cell; _cells)
+		foreach (ref agent; roundRobin(cast(Agent[]) _doctors, cast(Agent[]) _nurses,
+				cast(Agent[]) _visitors))
 		{
-			/// @note Trigger cell.logState() once in 30 ticks
-			if (currTick % 30 == 0)
-				cell.tick(true);
-			else
+			// writeln("Processing agent: " ~ agent.toString());
+			agent.tick();
+			// writeln(agent.toString());
+			// writeln(agent.toStringSchedule());
+		}
+		if (currTick % 30 == 0)
+		{
+			currTime += 30.seconds;
+			foreach (ref cell; _cells)
+			{
+				/// @note log agents in the cell.
 				cell.tick();
+			}
+
 		}
 		currTick += 1;
 	}
 
 	/// @brief Current tick
-	size_t currTick = 0;
+	long currTick = 0;
 
 private:
 	/// @brief Associate personnel with cells (create cells schedule)
@@ -304,26 +365,25 @@ private:
 	/// be spent.
 	void createSchedule()
 	{
-		size_t totalDoctorsHours = _cells.length * Cell.getAgentPresenceTime(AgentType.DOCTOR);
-		size_t totalNursesHours = _cells.length * Cell.getAgentPresenceTime(AgentType.NURSE);
-		size_t totalVisitorHours = _cells.length * Cell.getAgentPresenceTime(AgentType.VISITOR); /// @note Assuming that hospital is fully personnel-equipped
+		long totalDoctorsHours = _cells.length * Cell.getAgentPresenceTime(AgentType.DOCTOR);
+		long totalNursesHours = _cells.length * Cell.getAgentPresenceTime(AgentType.NURSE);
+		long totalVisitorHours = _cells.length * Cell.getAgentPresenceTime(AgentType.VISITOR); /// @note Assuming that hospital is fully personnel-equipped
 		/// The result of division ceiled. Some personnel could be not
 		/// fully occupied.
-		auto calcPersonnelCount = (size_t totalHours) => cast(size_t) ceil(
-				totalHours / cast(double) SHIFT_DURATION);
-		const size_t numberOfDoctors = calcPersonnelCount(totalDoctorsHours);
-		const size_t numberOfNurses = calcPersonnelCount(totalNursesHours);
-		const size_t numberOfVisitors = calcPersonnelCount(totalVisitorHours);
-		T[] genArray(T)(size_t len)
-		{
-			T[] t;
-			t.length = len;
-			return t;
-		}
+		auto calcPersonnelCount = (long totalHours, long shiftDur) => cast(long) ceil(
+				totalHours / cast(double) shiftDur);
+		const long numberOfDoctors = calcPersonnelCount(totalDoctorsHours, SHIFT_DURATION);
+		const long numberOfNurses = calcPersonnelCount(totalNursesHours, SHIFT_DURATION);
+		const long numberOfVisitors = calcPersonnelCount(totalVisitorHours, TICKS_HOUR);
 
-		_doctors ~= genArray!(Doctor)(numberOfDoctors);
-		_nurses ~= genArray!(Nurse)(numberOfDoctors);
-		_visitors ~= genArray!(Visitor)(numberOfDoctors);
+		_doctors.length = numberOfDoctors;
+		_nurses.length = numberOfNurses;
+		_visitors.length = numberOfVisitors;
+
+		fillArray(_doctors);
+		fillArray(_nurses);
+		fillArray(_visitors);
+
 		foreach (ref cell; _cells)
 		{
 			distributePersonnel(cell, AgentType.DOCTOR, totalDoctorsHours, _doctors);
@@ -334,21 +394,31 @@ private:
 
 	/// @brief Create cell schedule
 	void distributePersonnel(AgentArr)(Cell cell, AgentType agentT,
-			ref size_t totalWorkTime, AgentArr[] agentArr)
+			ref long totalWorkTime, AgentArr[] agentArr)
 	{
-		size_t requestedTime = Cell.getAgentPresenceTime(agentT);
+		long requestedTime = Cell.getAgentPresenceTime(agentT);
 
-		/// @note Circular range to be iterated over till the cell
+		/// @note Circular range to be iterated over until the cell
 		/// time presence requirement will be fullfilled.
-		auto agentCircularRange = cycle(agentArr[0 .. $]); /// @note while the cell presence time is not complitely scheduled,
+		auto agentCircularRange = cycle(agentArr[0 .. $]);
+		/// @note while the cell presence time is not complitely scheduled,
 		/// continue scheduling personnel (agentArr contents) to this cell.
+		long spentTime = 0;
+		long delayTillFirst = 0;
 		while (requestedTime > 0)
 		{
+			// writeln(requestedTime);
 			/// @brief Schedule personell for random duration (in specified boundaries)
 			/// until requested time is fullfilled.
 			auto currentAgent = agentCircularRange.front();
-			const size_t stayDur = currentAgent.schedule(cell, requestedTime);
-			requestedTime -= stayDur;
+			if (currentAgent.isSchedulable())
+			{
+				const long stayDur = currentAgent.schedule(cell, requestedTime, delayTillFirst);
+				delayTillFirst = stayDur;
+				requestedTime -= stayDur;
+				spentTime += stayDur;
+			}
+			agentCircularRange.popFront();
 		}
 	}
 
@@ -360,14 +430,50 @@ private:
 	Visitor[] _visitors;
 }
 
+/// @brief Logger which is used by Cell to record its state
+void logger(AgentArr)(const long id, AgentArr agents)
+{
+
+	// writeln("Cell " ~ to!string(id) ~ " at " ~ currTime.toSimpleString() ~ " contains:");
+	// foreach (ref agent; agents)
+	// {
+	// 	writeln("   " ~ agent.toString());
+	// }
+	/// @note All agents in this cell are registered as by their phones.
+	/// The expected generated log is all possible pairs of agents in this cell.
+	foreach (ref agent1; agents)
+	{
+		foreach (ref agent2; agents)
+		{
+			if (agent1 == agent2)
+				continue;
+
+			JSONValue contact = [
+				"agent_1" : agent1.toString(), "agent_2" : agent2.toString(),
+				"timestamp" : SysTime(currTime, UTC()).toISOExtString()
+			];
+
+			jj.array ~= contact;
+
+			// writeln(agent1.toString() ~ ' ' ~ agent2.toString() ~ ` ` ~ SysTime(currTime,
+			// 		UTC()).toISOExtString());
+		}
+	}
+}
+
+JSONValue jj;
+
 void main()
 {
-	Hospital hospital = new Hospital(500);
-	size_t duration = 24 * TICKS_HOUR;
+	jj = ["START OF FILE"]; // Can't create empty array
 
+	Hospital hospital = new Hospital(1000);
+	long duration = 24 * TICKS_HOUR;
 	while (duration > 0)
 	{
 		hospital.tick();
 		--duration;
 	}
+
+	std.file.write("contact_list", jj.toString());
 }

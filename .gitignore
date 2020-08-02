@@ -13,3 +13,4 @@ hospital-simulation-test-*
 *.o
 *.obj
 *.lst
+contact_list
