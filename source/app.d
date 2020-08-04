@@ -51,6 +51,13 @@ enum maxStayDuration = [
 		AgentType.VISITOR : TICKS_HOUR
 	];
 
+/// @brief Minimum stay at cell duration for different types of agents.
+/// @note Visitor spends all time in one cell, so the minimum is one hour.
+enum minStayDuration = [
+		AgentType.DOCTOR : TICKS_MINUTE, AgentType.NURSE : TICKS_MINUTE,
+		AgentType.VISITOR : TICKS_HOUR
+	];
+
 /// @brief Agent base class. Agent is one of a hospital residents.
 abstract class Agent
 {
@@ -65,6 +72,15 @@ abstract class Agent
 	/// @brief Agent ID
 	const UUID id;
 
+	/// @brief Get string representation
+	override string toString() const
+	{
+		return id.toString();
+	}
+
+	/// @brief Get string representation with agent type
+	string toStringVerbose() const;
+
 	/// @brief Process next tick.
 	void tick()
 	{
@@ -73,11 +89,8 @@ abstract class Agent
 		Cell currCell = scheduleQueue.front[0];
 		const long stayDur = scheduleQueue.front[1];
 		timeInCurrCell++;
-		// writeln("LOL");
-		// writeln(timeInCurrCell)
 		if (timeInCurrCell < stayDur)
 			return;
-		// writeln("EXACTLY!" ~ this.toString());
 		currCell.leaveCell(this);
 		scheduleQueue.removeFront();
 		if (scheduleQueue.empty)
@@ -146,6 +159,7 @@ mixin template SchedulableAgent(AgentType agentT)
 			cellDurPair = CellDurPair(cell, stayDur);
 		}
 		Cell previousCell;
+		/// @note if previous cell
 		if (!isFirstCell && (previousCell = scheduleQueue.back[0]) == cell)
 		{
 			auto dur = scheduleQueue.back[1];
@@ -162,9 +176,9 @@ mixin template SchedulableAgent(AgentType agentT)
 	/// @note Generates stay duration and decreases amount of notScheduledTime
 	final long scheduleImpl(long maxStayDur, ref long notScheduledTime, long requestedTime)
 	{
-		const long minDurOfVisit = min(notScheduledTime, TICKS_MINUTE, requestedTime);
+		const long minDurOfVisit = min(notScheduledTime, minStayDuration[agentT], requestedTime);
 		const long cappedStayDur = min(notScheduledTime, maxStayDur, requestedTime);
-		const long durOfVisit = uniform!"[]"(0, cappedStayDur);
+		const long durOfVisit = uniform!"[]"(minDurOfVisit, cappedStayDur);
 		notScheduledTime -= durOfVisit;
 		return durOfVisit;
 	}
@@ -177,9 +191,9 @@ public:
 	mixin SchedulableAgent!(AgentType.NURSE);
 
 	/// @brief Get string representation
-	override string toString() const
+	override string toStringVerbose() const
 	{
-		return id.toString();
+		return "Nurse: " ~ id.toString();
 	}
 }
 
@@ -190,9 +204,9 @@ public:
 	mixin SchedulableAgent!(AgentType.DOCTOR);
 
 	/// @brief Get string representation
-	override string toString()
+	override string toStringVerbose() const
 	{
-		return id.toString();
+		return "Doctor: " ~ id.toString();
 	}
 }
 
@@ -208,9 +222,9 @@ public:
 	}
 
 	/// @brief Get string representation
-	override string toString() const
+	override string toStringVerbose() const
 	{
-		return id.toString();
+		return "Visitor: " ~ id.toString();
 	}
 }
 
@@ -218,9 +232,9 @@ public:
 class Patient : Agent
 {
 	/// @brief Get string representation
-	override string toString() const
+	override string toStringVerbose() const
 	{
-		return id.toString();
+		return "Patient: " ~ id.toString();
 	}
 }
 
@@ -337,8 +351,6 @@ public:
 		{
 			// writeln("Processing agent: " ~ agent.toString());
 			agent.tick();
-			// writeln(agent.toString());
-			// writeln(agent.toStringSchedule());
 		}
 		if (currTick % 30 == 0)
 		{
@@ -403,20 +415,19 @@ private:
 		auto agentCircularRange = cycle(agentArr[0 .. $]);
 		/// @note while the cell presence time is not complitely scheduled,
 		/// continue scheduling personnel (agentArr contents) to this cell.
-		long spentTime = 0;
 		long delayTillFirst = 0;
 		while (requestedTime > 0)
 		{
-			// writeln(requestedTime);
 			/// @brief Schedule personell for random duration (in specified boundaries)
 			/// until requested time is fullfilled.
 			auto currentAgent = agentCircularRange.front();
 			if (currentAgent.isSchedulable())
 			{
+				/// @note Delay till first is introduced so all nurses won't appear in the 
+				/// first cell simultaneously.
 				const long stayDur = currentAgent.schedule(cell, requestedTime, delayTillFirst);
-				delayTillFirst = stayDur;
+				delayTillFirst += stayDur;
 				requestedTime -= stayDur;
-				spentTime += stayDur;
 			}
 			agentCircularRange.popFront();
 		}
@@ -437,8 +448,9 @@ void logger(AgentArr)(const long id, AgentArr agents)
 	// writeln("Cell " ~ to!string(id) ~ " at " ~ currTime.toSimpleString() ~ " contains:");
 	// foreach (ref agent; agents)
 	// {
-	// 	writeln("   " ~ agent.toString());
+	// 	writeln("   " ~ agent.toStringVerbose());
 	// }
+
 	/// @note All agents in this cell are registered as by their phones.
 	/// The expected generated log is all possible pairs of agents in this cell.
 	foreach (ref agent1; agents)
@@ -453,7 +465,15 @@ void logger(AgentArr)(const long id, AgentArr agents)
 				"timestamp" : SysTime(currTime, UTC()).toISOExtString()
 			];
 
-			jj.array ~= contact;
+			if (jsonIsEmpty)
+			{
+				jj = [contact]; /// @note Can't create empty array in std.json
+				jsonIsEmpty = false;
+			}
+			else
+			{
+				jj.array ~= contact;
+			}
 
 			// writeln(agent1.toString() ~ ' ' ~ agent2.toString() ~ ` ` ~ SysTime(currTime,
 			// 		UTC()).toISOExtString());
@@ -461,14 +481,13 @@ void logger(AgentArr)(const long id, AgentArr agents)
 	}
 }
 
+bool jsonIsEmpty = true; /// @note flag, since there is no isEmpty() function for std.json
 JSONValue jj;
 
 void main()
 {
-	jj = ["START OF FILE"]; // Can't create empty array
-
-	Hospital hospital = new Hospital(1000);
-	long duration = 24 * TICKS_HOUR;
+	Hospital hospital = new Hospital(10);
+	long duration = 5 * TICKS_MINUTE;
 	while (duration > 0)
 	{
 		hospital.tick();
